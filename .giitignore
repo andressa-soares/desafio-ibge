@@ -1,7 +1,3 @@
-# Arquivos gerados pela execução do programa
-resultado.csv
-estatistica.json
-
 # Ambiente Python
 __pycache__/
 *.pyc
