@@ -1,10 +1,22 @@
 import re
-
 import requests
 import unicodedata
-from difflib import get_close_matches
+from difflib import SequenceMatcher
 
 IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+
+
+class IbgeApiError(Exception):
+    """Erro de integração com a API do IBGE."""
+
+
+def log_info(message: str) -> None:
+    print(f"[INFO] {message}")
+
+
+def log_error(message: str) -> None:
+    print(f"[ERROR] {message}")
+
 
 def normalize_text(text: str) -> str:
     if text is None:
@@ -15,26 +27,52 @@ def normalize_text(text: str) -> str:
     text = "".join(char for char in text if not unicodedata.combining(char))
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     text = " ".join(text.split())
+
     return text
 
 
 def fetch_ibge_municipios() -> list[dict]:
-    response = requests.get(IBGE_URL, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    log_info(f"Consumindo API do IBGE: {IBGE_URL}")
+
+    try:
+        response = requests.get(IBGE_URL, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, list):
+            raise IbgeApiError("Resposta da API do IBGE não está no formato esperado.")
+
+        log_info(f"API do IBGE retornou {len(data)} municípios.")
+        return data
+
+    except requests.exceptions.Timeout as exc:
+        log_error("Timeout ao consumir a API do IBGE.")
+        raise IbgeApiError("Timeout ao consumir a API do IBGE.") from exc
+
+    except requests.exceptions.RequestException as exc:
+        log_error(f"Falha HTTP ao consumir a API do IBGE: {exc}")
+        raise IbgeApiError("Falha HTTP ao consumir a API do IBGE.") from exc
+
+    except ValueError as exc:
+        log_error("Falha ao converter resposta da API do IBGE para JSON.")
+        raise IbgeApiError("Resposta inválida da API do IBGE.") from exc
 
 
-def build_municipios_index(municipios: list[dict]) -> dict[str, dict]:
-    index = {}
+def build_municipios_index(municipios: list[dict]) -> dict[str, list[dict]]:
+    log_info("Montando índice normalizado de municípios do IBGE.")
+
+    index: dict[str, list[dict]] = {}
 
     for item in municipios:
         nome = item.get("nome", "")
+
         uf = (
             item.get("regiao-imediata", {})
             .get("regiao-intermediaria", {})
             .get("UF", {})
             .get("sigla", "")
         )
+
         regiao = (
             item.get("regiao-imediata", {})
             .get("regiao-intermediaria", {})
@@ -42,12 +80,11 @@ def build_municipios_index(municipios: list[dict]) -> dict[str, dict]:
             .get("regiao", {})
             .get("nome", "")
         )
+
         id_ibge = item.get("id", "")
 
         normalized_name = normalize_text(nome)
 
-        # Se houver duplicidade após normalização, guardamos em lista
-        # para poder detectar possível ambiguidade.
         if normalized_name not in index:
             index[normalized_name] = []
 
@@ -60,14 +97,33 @@ def build_municipios_index(municipios: list[dict]) -> dict[str, dict]:
             }
         )
 
+    log_info(f"Índice montado com {len(index)} chaves normalizadas.")
     return index
 
 
-def find_best_match(municipio_input: str, municipios_index: dict[str, list[dict]]) -> tuple[str, dict | None]:
+def calculate_similarity(text_a: str, text_b: str) -> float:
+    return SequenceMatcher(None, text_a, text_b).ratio()
+
+
+def find_best_match(
+    municipio_input: str,
+    municipios_index: dict[str, list[dict]],
+    similarity_threshold: float = 0.90,
+    ambiguity_margin: float = 0.02,
+) -> tuple[str, dict | None]:
     """
-    Retorna:
-    - status: OK | NAO_ENCONTRADO | AMBIGUO
-    - dados do município encontrado ou None
+    Regras:
+    - Match exato normalizado:
+        - 1 resultado -> OK
+        - mais de 1 resultado -> AMBIGUO
+    - Match aproximado:
+        - 1 candidato confiável -> OK
+        - mais de 1 candidato muito próximo -> NAO_ENCONTRADO
+        - nenhum candidato confiável -> NAO_ENCONTRADO
+
+    Observação:
+    - AMBIGUO só representa múltiplos resultados reais.
+    - Similaridade incerta não vira AMBIGUO; vira NAO_ENCONTRADO.
     """
     normalized_input = normalize_text(municipio_input)
 
@@ -79,25 +135,28 @@ def find_best_match(municipio_input: str, municipios_index: dict[str, list[dict]
         return "AMBIGUO", None
 
     # 2) Match aproximado
-    all_keys = list(municipios_index.keys())
-    close_matches = get_close_matches(normalized_input, all_keys, n=3, cutoff=0.84)
+    scored_candidates = []
+    for normalized_name in municipios_index.keys():
+        score = calculate_similarity(normalized_input, normalized_name)
+        if score >= similarity_threshold:
+            scored_candidates.append((normalized_name, score))
 
-    if not close_matches:
+    if not scored_candidates:
         return "NAO_ENCONTRADO", None
 
-    # Se vier mais de uma possibilidade muito parecida, marcamos como ambíguo
-    if len(close_matches) > 1:
-        first = close_matches[0]
-        second = close_matches[1]
+    scored_candidates.sort(key=lambda item: item[1], reverse=True)
 
-        # Se ambos existirem e estiverem muito próximos em "força" de match,
-        # preferimos ser conservadores.
-        if abs(len(first) - len(second)) <= 1:
-            if first[:3] == second[:3]:
-                return "AMBIGUO", None
+    best_key, best_score = scored_candidates[0]
 
-    selected_key = close_matches[0]
-    selected_matches = municipios_index.get(selected_key, [])
+    if len(scored_candidates) > 1:
+        _, second_score = scored_candidates[1]
+
+        # Se os dois melhores candidatos estão muito próximos,
+        # não é confiável assumir um match.
+        if second_score >= best_score - ambiguity_margin:
+            return "NAO_ENCONTRADO", None
+
+    selected_matches = municipios_index.get(best_key, [])
 
     if len(selected_matches) == 1:
         return "OK", selected_matches[0]
