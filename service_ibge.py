@@ -1,9 +1,10 @@
+import re
+
 import requests
 import unicodedata
 from difflib import get_close_matches
 
 IBGE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
-
 
 def normalize_text(text: str) -> str:
     if text is None:
@@ -12,6 +13,7 @@ def normalize_text(text: str) -> str:
     text = text.strip().lower()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
     text = " ".join(text.split())
     return text
 
