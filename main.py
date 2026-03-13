@@ -1,9 +1,15 @@
-from processor import process_input_csv, write_result_csv
+from processor import (
+    process_input_csv,
+    write_result_csv,
+    calculate_stats,
+    write_stats_json,
+)
 from service_ibge import fetch_ibge_municipios, build_municipios_index
 
 
 INPUT_FILE = "input.csv"
-OUTPUT_FILE = "resultado.csv"
+RESULTADO_FILE = "resultado.csv"
+ESTATISTICA_FILE = "estatistica.json"
 
 
 def main():
@@ -12,19 +18,15 @@ def main():
         municipios_index = build_municipios_index(municipios)
 
         resultados = process_input_csv(INPUT_FILE, municipios_index)
-        write_result_csv(OUTPUT_FILE, resultados)
+        write_result_csv(RESULTADO_FILE, resultados)
 
-        print(f"Arquivo '{OUTPUT_FILE}' gerado com sucesso.")
-        print("Resumo:")
-        for item in resultados:
-            print(
-                f"{item.municipio_input} -> "
-                f"{item.municipio_ibge or 'N/A'} | "
-                f"{item.uf or 'N/A'} | "
-                f"{item.regiao or 'N/A'} | "
-                f"{item.id_ibge or 'N/A'} | "
-                f"{item.status}"
-            )
+        stats = calculate_stats(resultados)
+        write_stats_json(ESTATISTICA_FILE, stats)
+
+        print(f"Arquivo '{RESULTADO_FILE}' gerado com sucesso.")
+        print(f"Arquivo '{ESTATISTICA_FILE}' gerado com sucesso.")
+        print("Estatísticas:")
+        print(stats)
 
     except Exception as error:
         print(f"Erro durante a execução: {error}")
